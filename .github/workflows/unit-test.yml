@@ -1,10 +1,6 @@
 name: Unit Tests
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-  merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,6 +20,7 @@ jobs:
           - "25"
           - "26"
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -46,12 +43,16 @@ jobs:
           matrix.node_version == '18' ||
           matrix.node_version == '20.6.0'
           }}
-      - run: npm install -g npm@latest
+      # npm@12 requires {"node":"^22.22.2 || ^24.15.0 || >=26.0.0"}
+      - run: npm install -g npm@"<12.0.0"
         if: ${{
           matrix.node_version == '20' ||
+          matrix.node_version == '25'
+          }}
+      - run: npm install -g npm@latest
+        if: ${{
           matrix.node_version == '22' ||
           matrix.node_version == '24' ||
-          matrix.node_version == '25' ||
           matrix.node_version == '26'
           }}
 
@@ -61,16 +62,30 @@ jobs:
       - name: Build 🔧
         run: npm run compile
 
-      - run: npm test
+      - run: npm test 2>&1 | tee test-output.log
+        shell: bash
 
-      - name: Report Coverage
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - name: Test results summary
+        if: ${{ always() }}
+        shell: bash
+        run: bash .github/scripts/seal-test-report.sh test-output.log
+
+      - name: Pack instrumentation-http
+        if: ${{ matrix.node_version == '24' }}
+        run: |
+          mkdir -p dist-out
+          npm pack --ignore-scripts --workspace=experimental/packages/opentelemetry-instrumentation-http --pack-destination=dist-out
+          mv dist-out/opentelemetry-instrumentation-http-0.219.0.tgz dist-out/instrumentation-http-0.219.0.tgz
+      - name: Upload instrumentation-http tarball
+        if: ${{ matrix.node_version == '24' }}
+        uses: actions/upload-artifact@v4
         with:
-          verbose: true
+          name: instrumentation-http-tgz
+          path: dist-out/instrumentation-http-0.219.0.tgz
+          if-no-files-found: error
   node-windows-tests:
     runs-on: windows-latest
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -95,9 +110,16 @@ jobs:
           npm run compile
 
       - name: Unit tests
-        run: npm run test
+        shell: bash
+        run: npm run test 2>&1 | tee test-output.log
+
+      - name: Test results summary
+        if: ${{ always() }}
+        shell: bash
+        run: bash .github/scripts/seal-test-report.sh test-output.log
   browser-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -118,15 +140,16 @@ jobs:
         run: npm run compile
 
       - name: Unit tests
-        run: npm run test:browser
-      - name: Report Coverage
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          verbose: true
+        shell: bash
+        run: npm run test:browser 2>&1 | tee test-output.log
+
+      - name: Test results summary
+        if: ${{ always() }}
+        shell: bash
+        run: bash .github/scripts/seal-test-report.sh test-output.log
   webworker-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -146,10 +169,10 @@ jobs:
         run: npm run compile
 
       - name: Unit tests
-        run: npm run test:webworker
-      - name: Report Coverage
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          verbose: true
+        shell: bash
+        run: npm run test:webworker 2>&1 | tee test-output.log
+
+      - name: Test results summary
+        if: ${{ always() }}
+        shell: bash
+        run: bash .github/scripts/seal-test-report.sh test-output.log
