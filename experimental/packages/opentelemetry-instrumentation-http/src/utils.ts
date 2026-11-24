@@ -80,6 +80,25 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import forwardedParse = require('forwarded-parse');
 
+const defaultQueryStringsToRedact = Array.from(DEFAULT_QUERY_STRINGS_TO_REDACT);
+
+/**
+ * Redacts sensitive query parameters from a query string (without leading '?').
+ * Returns the input unchanged if it cannot be parsed.
+ */
+export const redactQueryString = (
+  searchParams: URLSearchParams,
+  paramsToRedact: string[]
+): string => {
+  const params = new URLSearchParams(searchParams);
+  for (const param of paramsToRedact) {
+    if (params.has(param)) {
+      params.set(param, STR_REDACTED);
+    }
+  }
+  return params.toString();
+};
+
 /**
  * Get an absolute url
  */
@@ -105,19 +124,14 @@ export const getAbsoluteUrl = (
   ) {
     host += `:${port}`;
   }
-  // Redact sensitive query parameters
   if (path.includes('?')) {
     try {
       const parsedUrl = new URL(path, 'http://localhost');
-      const sensitiveParamsToRedact: string[] = redactedQueryParams || [];
-
-      for (const sensitiveParam of sensitiveParamsToRedact) {
-        if (parsedUrl.searchParams.get(sensitiveParam)) {
-          parsedUrl.searchParams.set(sensitiveParam, STR_REDACTED);
-        }
-      }
-
-      path = `${parsedUrl.pathname}${parsedUrl.search}`;
+      const redacted = redactQueryString(
+        parsedUrl.searchParams,
+        redactedQueryParams
+      );
+      path = `${parsedUrl.pathname}?${redacted}`;
     } catch {
       // Ignore error, as the path was not a valid URL.
     }
@@ -861,6 +875,38 @@ function getInfoFromIncomingMessage(
 }
 
 /**
+ * Redacts sensitive query parameters from the URL info of an incoming request.
+ * The info is returned as-is when its query string has none of the parameters
+ * to redact.
+ */
+function redactInfoFromIncomingMessage(
+  parsedUrl: { pathname?: string; search?: string; toString: () => string },
+  paramsToRedact: string[]
+): { pathname?: string; search?: string; toString: () => string } {
+  if (!parsedUrl.search) {
+    return parsedUrl;
+  }
+  const searchParams = new URLSearchParams(parsedUrl.search.slice(1));
+  if (!paramsToRedact.some(param => searchParams.has(param))) {
+    return parsedUrl;
+  }
+  const search = `?${redactQueryString(searchParams, paramsToRedact)}`;
+  if (parsedUrl instanceof URL) {
+    const redactedUrl = new URL(parsedUrl.href);
+    redactedUrl.search = search;
+    return redactedUrl;
+  }
+  const { pathname } = parsedUrl;
+  return {
+    pathname,
+    search,
+    toString: function () {
+      return `${pathname ?? ''}${search}`;
+    },
+  };
+}
+
+/**
  * Returns incoming request attributes scoped to the request data
  * @param {IncomingMessage} request the request object
  * @param {{ component: string, serverName?: string, hookAttributes?: Attributes }} options used to pass data needed to create attributes
@@ -874,6 +920,7 @@ export const getIncomingRequestAttributes = (
     hookAttributes?: Attributes;
     semconvStability: SemconvStability;
     enableSyntheticSourceDetection: boolean;
+    redactedQueryParams?: string[];
   },
   logger: DiagLogger
 ): Attributes => {
@@ -881,12 +928,14 @@ export const getIncomingRequestAttributes = (
     component,
     enableSyntheticSourceDetection,
     hookAttributes,
+    redactedQueryParams,
     semconvStability,
     serverName,
   } = options;
   const { headers, httpVersion, method } = request;
   const { host, 'user-agent': userAgent, 'x-forwarded-for': ips } = headers;
   const parsedUrl = getInfoFromIncomingMessage(component, request, logger);
+  const paramsToRedact = redactedQueryParams ?? defaultQueryStringsToRedact;
   let newAttributes: Attributes;
   let oldAttributes: Attributes;
 
@@ -912,7 +961,10 @@ export const getIncomingRequestAttributes = (
 
     if (parsedUrl.search) {
       // Remove leading '?' from URL search (https://developer.mozilla.org/en-US/docs/Web/API/URL/search).
-      newAttributes[ATTR_URL_QUERY] = parsedUrl.search.slice(1);
+      newAttributes[ATTR_URL_QUERY] = redactQueryString(
+        new URLSearchParams(parsedUrl.search.slice(1)),
+        paramsToRedact
+      );
     }
 
     if (remoteClientAddress != null) {
@@ -937,9 +989,13 @@ export const getIncomingRequestAttributes = (
   if (semconvStability !== SemconvStability.STABLE) {
     // Old attributes are used.
     const hostname = host?.replace(/^(.*)(:[0-9]{1,5})/, '$1') || 'localhost';
+    const redactedUrl = redactInfoFromIncomingMessage(
+      parsedUrl,
+      paramsToRedact
+    );
 
     oldAttributes = {
-      [ATTR_HTTP_URL]: parsedUrl.toString(),
+      [ATTR_HTTP_URL]: redactedUrl.toString(),
       [ATTR_HTTP_HOST]: host,
       [ATTR_NET_HOST_NAME]: hostname,
       [ATTR_HTTP_METHOD]: method,
@@ -954,9 +1010,9 @@ export const getIncomingRequestAttributes = (
       oldAttributes[ATTR_HTTP_SERVER_NAME] = serverName;
     }
 
-    if (parsedUrl.pathname) {
+    if (redactedUrl.pathname) {
       oldAttributes[ATTR_HTTP_TARGET] =
-        parsedUrl.pathname + parsedUrl.search || '/';
+        redactedUrl.pathname + redactedUrl.search || '/';
     }
 
     if (userAgent !== undefined) {

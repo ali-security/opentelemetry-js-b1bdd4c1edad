@@ -104,11 +104,22 @@ export interface HttpInstrumentationConfig extends InstrumentationConfig {
    **/
   enableSyntheticSourceDetection?: boolean;
   /**
-   * [Optional] Additional query parameters to redact.
+   * [Optional] Query parameters to redact on outgoing (client) spans.
    * Use this to specify custom query strings that contain sensitive information.
    * These will replace/overwrite the default query strings that are to be redacted.
-   * @example default strings ['sig','Signature','AWSAccessKeyId','X-Goog-Signature']
+   * When omitted, defaults to a built-in list of known sensitive parameter
+   * names: 'sig', 'Signature', 'AWSAccessKeyId', 'X-Goog-Signature',
+   * 'X-Amz-Signature', 'X-Amz-Credential' and 'X-Amz-Security-Token'.
+   * Set to an empty array to disable client-side query parameter redaction entirely.
    * @experimental
    */
   redactedQueryParams?: string[];
+  /**
+   * [Optional] Query parameters to redact on incoming (server) spans.
+   * When omitted, defaults to the same built-in list of known sensitive
+   * parameter names as `redactedQueryParams`.
+   * Set to an empty array to disable server-side query parameter redaction entirely.
+   * @experimental
+   */
+  redactedQueryParamsServer?: string[];
 }

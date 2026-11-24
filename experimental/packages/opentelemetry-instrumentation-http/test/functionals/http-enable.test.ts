@@ -30,6 +30,7 @@ import {
   ATTR_SERVER_PORT,
   ATTR_URL_FULL,
   ATTR_URL_PATH,
+  ATTR_URL_QUERY,
   ATTR_URL_SCHEME,
   HTTP_REQUEST_METHOD_VALUE_GET,
 } from '@opentelemetry/semantic-conventions';
@@ -1172,6 +1173,25 @@ describe('HttpInstrumentation', () => {
         );
       });
 
+      it('should redact sensitive query parameters from the `url.query` attribute (server side)', async () => {
+        await httpRequest.get(
+          `${protocol}://${hostname}:${serverPort}${pathname}?X-Amz-Signature=secret&sig=&sig=secret2&normal=value`
+        );
+        const spans = memoryExporter.getFinishedSpans();
+        const [incomingSpan, outgoingSpan] = spans;
+        assert.strictEqual(spans.length, 2);
+        assert.strictEqual(incomingSpan.kind, SpanKind.SERVER);
+        assert.strictEqual(
+          incomingSpan.attributes[ATTR_URL_QUERY],
+          'X-Amz-Signature=REDACTED&sig=REDACTED&normal=value'
+        );
+        assert.strictEqual(outgoingSpan.kind, SpanKind.CLIENT);
+        assert.strictEqual(
+          outgoingSpan.attributes[ATTR_URL_FULL],
+          `${protocol}://${hostname}:${serverPort}${pathname}?X-Amz-Signature=REDACTED&sig=REDACTED&normal=value`
+        );
+      });
+
       it('should generate semconv 1.27 server spans with route when RPC metadata is available', async () => {
         const response = await httpRequest.get(
           `${protocol}://${hostname}:${serverPort}${pathname}/setroute`
@@ -1760,7 +1780,7 @@ describe('HttpInstrumentation', () => {
       );
     });
 
-    it('should not modify URLs with empty query parameters', async () => {
+    it('should redact sensitive query parameters with empty values', async () => {
       await httpRequest.get(
         `${protocol}://${hostname}:${serverPort}${pathname}?sig=&empty=`
       );
@@ -1769,7 +1789,7 @@ describe('HttpInstrumentation', () => {
 
       assert.strictEqual(
         outgoingSpan.attributes[ATTR_HTTP_URL],
-        `${protocol}://${hostname}:${serverPort}${pathname}?sig=&empty=`
+        `${protocol}://${hostname}:${serverPort}${pathname}?sig=REDACTED&empty=`
       );
     });
 
@@ -1856,6 +1876,125 @@ describe('HttpInstrumentation', () => {
         'token=REDACTED&X-Goog-Signature=gcp&AWSAccessKeyId=aws';
 
       assert.strictEqual(outgoingSpan.attributes[ATTR_HTTP_URL], expectedUrl);
+    });
+    it('should redact default query strings on incoming (server) spans', async () => {
+      instrumentation.setConfig({});
+
+      await httpRequest.get(
+        `${protocol}://${hostname}:${serverPort}${pathname}?X-Goog-Signature=xyz789&sig=&sig=secret&normal=value`
+      );
+      const spans = memoryExporter.getFinishedSpans();
+      const [incomingSpan, outgoingSpan] = spans;
+
+      assert.strictEqual(spans.length, 2);
+      assert.strictEqual(incomingSpan.kind, SpanKind.SERVER);
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?X-Goog-Signature=REDACTED&sig=REDACTED&normal=value`
+      );
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_TARGET],
+        `${pathname}?X-Goog-Signature=REDACTED&sig=REDACTED&normal=value`
+      );
+      assert.strictEqual(outgoingSpan.kind, SpanKind.CLIENT);
+      assert.strictEqual(
+        outgoingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?X-Goog-Signature=REDACTED&sig=REDACTED&normal=value`
+      );
+    });
+    it('should redact X-Amz-* query strings by default (client side and server side)', async () => {
+      instrumentation.setConfig({});
+
+      await httpRequest.get(
+        `${protocol}://${hostname}:${serverPort}${pathname}?X-Amz-Credential=cred&X-Amz-Security-Token=token&X-Amz-Signature=sig&normal=value`
+      );
+      const spans = memoryExporter.getFinishedSpans();
+      const [incomingSpan, outgoingSpan] = spans;
+
+      const expectedQuery =
+        'X-Amz-Credential=REDACTED&X-Amz-Security-Token=REDACTED&' +
+        'X-Amz-Signature=REDACTED&normal=value';
+      assert.strictEqual(spans.length, 2);
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?${expectedQuery}`
+      );
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_TARGET],
+        `${pathname}?${expectedQuery}`
+      );
+      assert.strictEqual(
+        outgoingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?${expectedQuery}`
+      );
+    });
+    it('should redact only redactedQueryParamsServer on incoming (server) spans when provided', async () => {
+      instrumentation.setConfig({
+        redactedQueryParamsServer: ['session_id'],
+      });
+
+      await httpRequest.get(
+        `${protocol}://${hostname}:${serverPort}${pathname}?sig=abc123&session_id=xyz789&normal=value`
+      );
+      const spans = memoryExporter.getFinishedSpans();
+      const [incomingSpan, outgoingSpan] = spans;
+
+      assert.strictEqual(spans.length, 2);
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?sig=abc123&session_id=REDACTED&normal=value`
+      );
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_TARGET],
+        `${pathname}?sig=abc123&session_id=REDACTED&normal=value`
+      );
+      // client side keeps using the default list
+      assert.strictEqual(
+        outgoingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?sig=REDACTED&session_id=xyz789&normal=value`
+      );
+    });
+    it('should not use redactedQueryParams on incoming (server) spans', async () => {
+      instrumentation.setConfig({
+        redactedQueryParams: [],
+      });
+
+      await httpRequest.get(
+        `${protocol}://${hostname}:${serverPort}${pathname}?Signature=secret&normal=value`
+      );
+      const spans = memoryExporter.getFinishedSpans();
+      const [incomingSpan, outgoingSpan] = spans;
+
+      assert.strictEqual(spans.length, 2);
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?Signature=REDACTED&normal=value`
+      );
+      assert.strictEqual(
+        outgoingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?Signature=secret&normal=value`
+      );
+    });
+    it('should not redact query strings on incoming (server) spans when redactedQueryParamsServer is empty', async () => {
+      instrumentation.setConfig({
+        redactedQueryParamsServer: [],
+      });
+
+      await httpRequest.get(
+        `${protocol}://${hostname}:${serverPort}${pathname}?sig=secret&normal=value`
+      );
+      const spans = memoryExporter.getFinishedSpans();
+      const [incomingSpan] = spans;
+
+      assert.strictEqual(spans.length, 2);
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_URL],
+        `${protocol}://${hostname}:${serverPort}${pathname}?sig=secret&normal=value`
+      );
+      assert.strictEqual(
+        incomingSpan.attributes[ATTR_HTTP_TARGET],
+        `${pathname}?sig=secret&normal=value`
+      );
     });
   });
 });
